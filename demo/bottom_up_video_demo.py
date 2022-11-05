@@ -5,6 +5,7 @@ from argparse import ArgumentParser
 
 import cv2
 import mmcv
+import json
 
 from mmpose.apis import (inference_bottom_up_pose_model, init_pose_model,
                          vis_pose_result)
@@ -27,6 +28,8 @@ def main():
         default='',
         help='Root of the output video file. '
         'Default not saving the visualization video.')
+    parser.add_argument(
+        '--keypoint-path', type=str, default='', help='keypoint path')
     parser.add_argument(
         '--device', default='cuda:0', help='Device used for inference')
     parser.add_argument(
@@ -91,6 +94,7 @@ def main():
     # e.g. use ('backbone', ) to return backbone feature
     output_layer_names = None
 
+    keypoint_result = []
     print('Running inference...')
     for _, cur_frame in enumerate(mmcv.track_iter_progress(video)):
         pose_results, _ = inference_bottom_up_pose_model(
@@ -101,6 +105,7 @@ def main():
             pose_nms_thr=args.pose_nms_thr,
             return_heatmap=return_heatmap,
             outputs=output_layer_names)
+        keypoint_result.append(np.array(pose_results).tolist())
 
         # show the results
         vis_frame = vis_pose_result(
@@ -127,6 +132,9 @@ def main():
         videoWriter.release()
     if args.show:
         cv2.destroyAllWindows()
+    with open(args.keypoint_path, "w") as f:
+        json.dump(keypoint_result, f)
+
 
 
 if __name__ == '__main__':

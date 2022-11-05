@@ -18,6 +18,14 @@ except (ImportError, ModuleNotFoundError):
     has_mmdet = False
 
 
+import json
+import numpy as np
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
 def main():
     """Visualize the demo video (support both single-frame and multi-frame).
 
@@ -29,6 +37,8 @@ def main():
     parser.add_argument('pose_config', help='Config file for pose')
     parser.add_argument('pose_checkpoint', help='Checkpoint file for pose')
     parser.add_argument('--video-path', type=str, help='Video path')
+    parser.add_argument(
+        '--keypoint-path', type=str, default='', help='keypoint path')
     parser.add_argument(
         '--show',
         action='store_true',
@@ -138,6 +148,7 @@ def main():
     output_layer_names = None
 
     print('Running inference...')
+    keypoint_result = []
     for frame_id, cur_frame in enumerate(mmcv.track_iter_progress(video)):
         # get the detection results of current frame
         # the resulting box is (x1, y1, x2, y2)
@@ -161,6 +172,7 @@ def main():
             dataset_info=dataset_info,
             return_heatmap=return_heatmap,
             outputs=output_layer_names)
+        keypoint_result.append(pose_results)
 
         # show the results
         vis_frame = vis_pose_result(
@@ -182,6 +194,10 @@ def main():
 
         if args.show and cv2.waitKey(1) & 0xFF == ord('q'):
             break
+        
+    
+    with open(args.keypoint_path, "w") as f:
+        json.dump(keypoint_result, f, cls=NumpyEncoder)
 
     if save_out_video:
         videoWriter.release()

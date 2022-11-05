@@ -2,12 +2,14 @@
 import copy
 import os
 import os.path as osp
+from pathlib import Path
 import warnings
 from argparse import ArgumentParser
 
 import cv2
 import mmcv
 import numpy as np
+import json
 
 from mmpose.apis import (collect_multi_frames, extract_pose_sequence,
                          get_track_id, inference_pose_lifter_model,
@@ -24,6 +26,12 @@ try:
 except (ImportError, ModuleNotFoundError):
     has_mmdet = False
 
+import json
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
 
 def convert_keypoint_definition(keypoints, pose_det_dataset,
                                 pose_lift_dataset):
@@ -169,6 +177,56 @@ def convert_keypoint_definition(keypoints, pose_det_dataset,
 
     return keypoints_new
 
+def unit_vector(vector):
+    """ Returns the unit vector of the vector.  """
+    return vector / np.linalg.norm(vector)
+
+def angle_between(v1, v2):
+    """ Returns the angle in radians between vectors 'v1' and 'v2'::
+
+            >>> angle_between((1, 0, 0), (0, 1, 0))
+            1.5707963267948966
+            >>> angle_between((1, 0, 0), (1, 0, 0))
+            0.0
+            >>> angle_between((1, 0, 0), (-1, 0, 0))
+            3.141592653589793
+    """
+    v1_u = unit_vector(v1)
+    v2_u = unit_vector(v2)
+    return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
+
+
+angle_point = [
+    (0, 1, 4), # ['root (pelvis)', 'right_hip', 'left_hip'] 0
+    (0, 1, 7), # ['root (pelvis)', 'right_hip', 'spine'] 1
+    (0, 4, 7), # ['root (pelvis)', 'left_hip', 'spine'] 2
+    (1, 0, 2), # ['right_hip', 'root (pelvis)', 'right_knee'] 3
+    (2, 1, 3), # ['right_knee', 'right_hip', 'right_foot'] 4
+    (4, 0, 5), # ['left_hip', 'root (pelvis)', 'left_knee'] 5
+    (5, 4, 6), # ['left_knee', 'left_hip', 'left_foot'] 6
+    (7, 0, 8), # ['spine', 'root (pelvis)', 'thorax'] 7
+    (8, 7, 9), # ['thorax', 'spine', 'neck_base'] 8
+    (8, 7, 11), # ['thorax', 'spine', 'left_shoulder'] 9
+    (8, 7, 14), # ['thorax', 'spine', 'right_shoulder'] 10
+    (8, 9, 11), # ['thorax', 'neck_base', 'left_shoulder'] 11 
+    (8, 9, 14), # ['thorax', 'neck_base', 'right_shoulder'] 12
+    (8, 11, 14), # ['thorax', 'left_shoulder', 'right_shoulder'] 13
+    (9, 8, 10), # ['neck_base', 'thorax', 'head'] 14
+    (11, 8, 12), # ['left_shoulder', 'thorax', 'left_elbow'] 15
+    (12, 11, 13), # ['left_elbow', 'left_shoulder', 'left_wrist'] 16
+    (14, 8, 15), # ['right_shoulder', 'thorax', 'right_elbow'] 17
+    (15, 14, 16) # ['right_elbow', 'right_shoulder', 'right_wrist'] 18
+]
+
+def load_angle(kp3, kp2):
+    angle_d = []
+    for p1, p2, p3 in angle_point:
+        v1 = kp3[p2] - kp3[p1]
+        v2 = kp3[p3] - kp3[p1]
+        score = float(kp2[p1, 2] * kp2[p2, 2] * kp2[p3, 2])
+        angle = float(angle_between(v1, v2))
+        angle_d.append([angle, score])
+    return angle_d
 
 def main():
     parser = ArgumentParser()
@@ -192,6 +250,8 @@ def main():
         help='Checkpoint file for the 2nd stage pose lifter model')
     parser.add_argument(
         '--video-path', type=str, default='', help='Video path')
+    parser.add_argument(
+        '--keypoint-path', type=str, default='', help='keypoint path')
     parser.add_argument(
         '--rebase-keypoint-height',
         action='store_true',
@@ -285,6 +345,12 @@ def main():
 
     video = mmcv.VideoReader(args.video_path)
     assert video.opened, f'Failed to load video file {args.video_path}'
+    video_resolution = video.resolution
+
+    keypoint_path = Path(args.keypoint_path)
+    if keypoint_path.is_file():
+        print("Keypoint Exist")
+        #return
 
     # First stage: 2D pose detection
     print('Stage 1: 2D pose detection.')
@@ -387,7 +453,6 @@ def main():
 
     if save_out_video:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        fps = video.fps
         writer = None
 
     # convert keypoint definition
@@ -424,6 +489,9 @@ def main():
         pose_lift_dataset_info = DatasetInfo(pose_lift_dataset_info)
 
     print('Running 2D-to-3D pose lifting inference...')
+    keypoint_result = []
+    keypoint2d_result = []
+    angle_result = []
     for i, pose_det_results in enumerate(
             mmcv.track_iter_progress(pose_det_results_list)):
         # extract and pad input pose2d sequence
@@ -445,7 +513,7 @@ def main():
             dataset=pose_lift_dataset,
             dataset_info=pose_lift_dataset_info,
             with_track_id=True,
-            image_size=video.resolution,
+            image_size=video_resolution,
             norm_pose_2d=args.norm_pose_2d)
 
         # Pose processing
@@ -470,6 +538,10 @@ def main():
             res['bbox'] = det_res['bbox']
             res['track_id'] = instance_id
             pose_lift_results_vis.append(res)
+            keypoint2d_result.append(res['keypoints'].tolist())
+            keypoint_result.append(keypoints_3d.tolist())
+            angle_3d = load_angle(keypoints_3d, res['keypoints'])
+            angle_result.append(angle_3d)
 
         # Visualization
         if num_instances < 0:
@@ -485,18 +557,36 @@ def main():
             thickness=args.thickness,
             num_instances=num_instances,
             show=args.show)
+        
+        if len(angle_result) > 0:
+            for i, d in enumerate(angle_result[-1]):
+                cv2.putText(img_vis, 
+                            f"{i} - {d[0] / np.pi * 180:6.2f} [{d[1]:.2f}]", 
+                            (20, 20*i + 20), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (255, 0, 0), 
+                            2, 
+                            cv2.LINE_4)
 
         if save_out_video:
             if writer is None:
                 writer = cv2.VideoWriter(
                     osp.join(args.out_video_root,
                              f'vis_{osp.basename(args.video_path)}'), fourcc,
-                    fps, (img_vis.shape[1], img_vis.shape[0]))
+                    video.fps, (img_vis.shape[1], img_vis.shape[0]))
             writer.write(img_vis)
 
     if save_out_video:
         writer.release()
 
+    kp_d = {}
+    kp_d["keypoint_3d"] = keypoint_result
+    kp_d["keypoint_2d"] = keypoint2d_result
+    kp_d["angle"] = angle_result
+
+    with open(args.keypoint_path, "w") as f:
+        json.dump(kp_d, f)
 
 if __name__ == '__main__':
     main()
+
